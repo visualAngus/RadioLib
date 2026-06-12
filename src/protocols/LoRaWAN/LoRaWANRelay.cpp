@@ -85,7 +85,7 @@ int16_t LoRaWANRelay::relayLoop() {
   uint8_t worBuf[RADIOLIB_LORAWAN_WOR_JOIN_FRAME_LEN];
   size_t worLen = 0;
 
-  int16_t state = this->receiveEdFrame(worCh->freq, worCh->dr, worBuf, &worLen, 500);
+  int16_t state = this->receiveEdFrame(worCh->freq, worCh->dr, worBuf, &worLen, 1200);
   if(state != RADIOLIB_ERR_NONE || worLen == 0) {
     return(RADIOLIB_ERR_NONE);
   }
@@ -115,7 +115,9 @@ int16_t LoRaWANRelay::relayLoopOnDetected(uint8_t chIdx) {
   uint8_t worBuf[RADIOLIB_LORAWAN_WOR_JOIN_FRAME_LEN];
   size_t worLen = 0;
 
-  int16_t state = this->receiveEdFrame(worCh->freq, worCh->dr, worBuf, &worLen, 500);
+  // WOR preamble = 256 symbols at SF9/125kHz ≈ 1048ms, payload ≈ 132ms → frame ≈ 1180ms.
+  // CAD may fire at the very start of the preamble, so receive() must cover the full frame.
+  int16_t state = this->receiveEdFrame(worCh->freq, worCh->dr, worBuf, &worLen, 1200);
   if(state != RADIOLIB_ERR_NONE || worLen == 0) {
     return(RADIOLIB_ERR_NONE);
   }
