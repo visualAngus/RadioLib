@@ -45,6 +45,7 @@
 #define RADIOLIB_LORAWAN_FPORT_PAYLOAD_MIN                      (0x01 << 0) //  7     0     start of user-allowed fPort range
 #define RADIOLIB_LORAWAN_FPORT_PAYLOAD_MAX                      (0xDF << 0) //  7     0     end of user-allowed fPort range
 #define RADIOLIB_LORAWAN_FPORT_RESERVED                         (0xE0 << 0) //  7     0     fPort values equal to and larger than this are reserved
+#define RADIOLIB_LORAWAN_FPORT_TS011                            (226)        //               TS011 Relay package FPort
 
 // data rate encoding
 #define RADIOLIB_LORAWAN_DATA_RATE_UNUSED                       (0x0F << 0) // reserved / unused data rate
@@ -56,6 +57,7 @@
 #define RADIOLIB_LORAWAN_RX1                                    (0x01 << 0)
 #define RADIOLIB_LORAWAN_RX2                                    (0x02 << 0)
 #define RADIOLIB_LORAWAN_RX_BC                                  (0x03 << 0)
+#define RADIOLIB_LORAWAN_RXR                                    (0x04 << 0) // TS011 Relay receive window
 #define RADIOLIB_LORAWAN_BAND_DYNAMIC                           (0)
 #define RADIOLIB_LORAWAN_BAND_FIXED                             (1)
 #define RADIOLIB_LORAWAN_CHANNEL_NUM_DATARATES                  (15)
@@ -100,6 +102,44 @@
 #define RADIOLIB_LORAWAN_JOIN_ACCEPT_AES_JOIN_EUI_POS           (4)
 #define RADIOLIB_LORAWAN_JOIN_ACCEPT_AES_DEV_NONCE_POS          (12)
 #define RADIOLIB_LORAWAN_JOIN_ACCEPT_AES_DEV_ADDR_POS           (1)   // relay keys
+
+// Default delay (ms) after WOR TX before opening WOR-ACK receive window.
+// Relay must complete CAD detection, decode WOR, and start transmitting ACK.
+// Tunable per deployment; 500ms is conservative for typical CAD periods.
+#define RADIOLIB_LORAWAN_WOR_ACK_DELAY_MS                       (500)
+
+// Minimum TOffset for RXR window; prevents passing dlDelay=0 to receiveClassA
+#define RADIOLIB_LORAWAN_WOR_RXR_TOFFSET_MIN_MS                 (100)
+
+// TS011 WOR frame layout (total 15 bytes: MHDR+DevAddr+FCnt+DR_Period+Freq+MIC)
+#define RADIOLIB_LORAWAN_WOR_FRAME_LEN                          (15)
+#define RADIOLIB_LORAWAN_WOR_MHDR_POS                           (0)
+#define RADIOLIB_LORAWAN_WOR_DEV_ADDR_POS                       (1)
+#define RADIOLIB_LORAWAN_WOR_FCNT_POS                           (5)
+#define RADIOLIB_LORAWAN_WOR_DR_PERIOD_POS                      (7)
+#define RADIOLIB_LORAWAN_WOR_FREQ_POS                           (8)
+#define RADIOLIB_LORAWAN_WOR_MIC_POS                            (11)
+#define RADIOLIB_LORAWAN_WOR_PAYLOAD_LEN                        (11) // bytes covered by MIC
+
+// TS011 WOR-ACK frame layout (total 12 bytes: MHDR+EncPayload+MIC)
+#define RADIOLIB_LORAWAN_WOR_ACK_FRAME_LEN                      (12)
+#define RADIOLIB_LORAWAN_WOR_ACK_PAYLOAD_LEN                    (7)
+#define RADIOLIB_LORAWAN_WOR_ACK_CAD_TO_RX_POS                 (0)
+#define RADIOLIB_LORAWAN_WOR_ACK_RELAY_DR_POS                  (1)
+#define RADIOLIB_LORAWAN_WOR_ACK_XTAL_ACC_POS                  (2)
+#define RADIOLIB_LORAWAN_WOR_ACK_CAD_PERIOD_POS                (4)
+#define RADIOLIB_LORAWAN_WOR_ACK_TOFFSET_POS                   (5)
+
+// TS011 WOR-J frame layout (relay-assisted Join-Request, 19 bytes)
+// MHDR(1) | DR+WORPeriod(1) | Freq(3) | JoinEUI(8) | DevNonce(2) | MIC(4)
+#define RADIOLIB_LORAWAN_WOR_JOIN_FRAME_LEN                     (19)
+#define RADIOLIB_LORAWAN_WOR_JOIN_MHDR_POS                      (0)
+#define RADIOLIB_LORAWAN_WOR_JOIN_DR_PERIOD_POS                 (1)
+#define RADIOLIB_LORAWAN_WOR_JOIN_FREQ_POS                      (2)
+#define RADIOLIB_LORAWAN_WOR_JOIN_EUI_POS                       (5)
+#define RADIOLIB_LORAWAN_WOR_JOIN_DEV_NONCE_POS                 (13)
+#define RADIOLIB_LORAWAN_WOR_JOIN_MIC_POS                       (15)
+#define RADIOLIB_LORAWAN_WOR_JOIN_PAYLOAD_LEN                   (15)
 
 // join accept message variables
 #define RADIOLIB_LORAWAN_JOIN_ACCEPT_R_1_0                      (0x00 << 7) //  7     7     LoRaWAN revision: 1.0
@@ -1024,6 +1064,10 @@ class LoRaWANNode {
     uint8_t nwkSEncKey[RADIOLIB_AES128_KEY_SIZE] = { 0 };
     uint8_t jSIntKey[RADIOLIB_AES128_KEY_SIZE] = { 0 };
 
+    // TS011 Relay session keys (derived in processJoinAccept)
+    uint8_t worSIntKey[RADIOLIB_AES128_KEY_SIZE] = { 0 };
+    uint8_t worSEncKey[RADIOLIB_AES128_KEY_SIZE] = { 0 };
+
     uint16_t keyCheckSum = 0;
     
     // device-specific parameters, persistent through sessions
@@ -1121,6 +1165,12 @@ class LoRaWANNode {
 
     // save the selected sub-band in case this must be restored in ADR control
     uint8_t subBand = 0;
+
+    // TS011 WOR-ACK state
+    bool worAckReceived = false;
+    uint8_t worRxrDr = RADIOLIB_LORAWAN_DATA_RATE_UNUSED;
+    uint32_t worRxrFreq = 0;
+    RadioLibTime_t worTOffset = 0;
 
     // user-provided sleep callback
     SleepCb_t sleepCb = nullptr;
@@ -1244,6 +1294,18 @@ class LoRaWANNode {
 
     // common function add an app/nwk package, used by both addAppPackage and addNwkPackage
     int16_t addPackage(uint8_t fPort, bool isApp);
+
+    // compose a TS011 WOR frame into the provided buffer (must be RADIOLIB_LORAWAN_WOR_FRAME_LEN bytes)
+    int16_t composeWoR(uint8_t* out);
+
+    // compose a TS011 WOR-J frame for relay-assisted OTAA join (must be RADIOLIB_LORAWAN_WOR_JOIN_FRAME_LEN bytes)
+    int16_t composeWoRJoin(uint8_t* out);
+
+    // open WOR-ACK receive window on txAck channels; populates worAckReceived and related fields
+    int16_t receiveWorAck();
+
+    // keyed variant: used pre-join when session keys are not yet available
+    int16_t receiveWorAck(uint8_t* intKey, uint8_t* encKey, uint32_t addr, uint32_t fcnt);
 
     // function that allows sleeping via user-provided callback
     void sleepDelay(RadioLibTime_t ms, bool radioOff = true);

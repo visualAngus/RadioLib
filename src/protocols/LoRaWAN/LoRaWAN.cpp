@@ -194,7 +194,23 @@ int16_t LoRaWANNode::sendReceive(const uint8_t* dataUp, size_t lenUp, uint8_t fP
 
     // if CSMA is enabled, repeat channel selection & encryption up to numHops times
     } while(this->csmaEnabled && numHops-- > 0 && !this->csmaChannelClear(this->difsSlots, numBackoff));
-    
+
+    // TS011: send WOR frame before the regular uplink when relay package is enabled
+    if(this->packages[RADIOLIB_LORAWAN_FPORT_TS011 - RADIOLIB_LORAWAN_FPORT_RESERVED].enabled &&
+       this->band->txWoR[0].freq != 0) {
+      uint8_t worMsg[RADIOLIB_LORAWAN_WOR_FRAME_LEN];
+      this->composeWoR(worMsg);
+      // select WOR channel (alternate between the two if both are available)
+      const LoRaWANChannel_t* worCh = &this->band->txWoR[trans & 0x01];
+      if(worCh->freq == 0) {
+        worCh = &this->band->txWoR[0];
+      }
+      // transmit WOR frame; ignore error (non-fatal, relay is optional)
+      (void)this->transmitUplink(worCh, worMsg, RADIOLIB_LORAWAN_WOR_FRAME_LEN);
+      // attempt to receive WOR-ACK from relay
+      this->receiveWorAck();
+    }
+
     // send it (without the MIC calculation blocks)
     state = this->transmitUplink(&this->channels[RADIOLIB_LORAWAN_UPLINK],
                                 &uplinkMsg[RADIOLIB_LORAWAN_FHDR_LEN_START_OFFS], 
@@ -912,6 +928,26 @@ int16_t LoRaWANNode::processJoinAccept(LoRaWANJoinEvent_t *joinEvent) {
 
   LoRaWANNode::hton<uint32_t>(&this->bufferNonces[RADIOLIB_LORAWAN_NONCES_JOIN_NONCE], this->joinNonce, 3);
 
+  // derive TS011 WOR session keys from root key and DevAddr
+  {
+    uint8_t* worRootKey = (this->rev == 1) ? this->nwkKey : this->appKey;
+    uint8_t worKeyBuff[RADIOLIB_AES128_BLOCK_SIZE] = { 0 };
+    LoRaWANNode::hton<uint32_t>(&worKeyBuff[RADIOLIB_LORAWAN_JOIN_ACCEPT_AES_DEV_ADDR_POS], this->devAddr);
+
+    worKeyBuff[0] = RADIOLIB_LORAWAN_JOIN_ACCEPT_ROOT_WOR_S_KEY;
+    uint8_t rootWorSKey[RADIOLIB_AES128_KEY_SIZE];
+    mod->hal->aes128->init(worRootKey);
+    mod->hal->aes128->encryptECB(worKeyBuff, RADIOLIB_AES128_BLOCK_SIZE, rootWorSKey);
+
+    worKeyBuff[0] = RADIOLIB_LORAWAN_JOIN_ACCEPT_WOR_S_INT_KEY;
+    mod->hal->aes128->init(rootWorSKey);
+    mod->hal->aes128->encryptECB(worKeyBuff, RADIOLIB_AES128_BLOCK_SIZE, this->worSIntKey);
+
+    worKeyBuff[0] = RADIOLIB_LORAWAN_JOIN_ACCEPT_WOR_S_ENC_KEY;
+    mod->hal->aes128->init(rootWorSKey);
+    mod->hal->aes128->encryptECB(worKeyBuff, RADIOLIB_AES128_BLOCK_SIZE, this->worSEncKey);
+  }
+
   // store DevAddr and all keys
   LoRaWANNode::hton<uint32_t>(&this->bufferSession[RADIOLIB_LORAWAN_SESSION_DEV_ADDR], this->devAddr);
   memcpy(&this->bufferSession[RADIOLIB_LORAWAN_SESSION_APP_SKEY], this->appSKey, RADIOLIB_AES128_KEY_SIZE);
@@ -983,11 +1019,22 @@ int16_t LoRaWANNode::activateOTAA(LoRaWANJoinEvent_t *joinEvent) {
   int16_t state = this->selectChannels();
   RADIOLIB_ASSERT(state);
   
+  // TS011: send WOR-J frame before the Join-Request when relay package is enabled
+  if(this->packages[RADIOLIB_LORAWAN_FPORT_TS011 - RADIOLIB_LORAWAN_FPORT_RESERVED].enabled &&
+     this->band->txWoR[0].freq != 0) {
+    uint8_t worJMsg[RADIOLIB_LORAWAN_WOR_JOIN_FRAME_LEN];
+    this->composeWoRJoin(worJMsg);
+    const LoRaWANChannel_t* worCh = &this->band->txWoR[0];
+    (void)this->transmitUplink(worCh, worJMsg, RADIOLIB_LORAWAN_WOR_JOIN_FRAME_LEN);
+    // pre-join: use NwkKey for WOR-ACK MIC/decrypt; devAddr=0, fcnt=0
+    this->receiveWorAck(this->nwkKey, this->nwkKey, 0, 0);
+  }
+
   RADIOLIB_DEBUG_PROTOCOL_PRINTLN("JoinRequest (DevNonce = %d):", this->devNonce);
   RADIOLIB_DEBUG_PROTOCOL_HEXDUMP(joinRequestMsg, RADIOLIB_LORAWAN_JOIN_REQUEST_LEN);
 
-  state = this->transmitUplink(&this->channels[RADIOLIB_LORAWAN_UPLINK], 
-                                joinRequestMsg, 
+  state = this->transmitUplink(&this->channels[RADIOLIB_LORAWAN_UPLINK],
+                                joinRequestMsg,
                                 RADIOLIB_LORAWAN_JOIN_REQUEST_LEN);
   RADIOLIB_ASSERT(state);
 
@@ -1842,12 +1889,31 @@ int16_t LoRaWANNode::receiveDownlink() {
   RADIOLIB_ASSERT(state);
 
   // open Rx2 window
-  state = this->receiveClassA(RADIOLIB_LORAWAN_DOWNLINK, 
-                              &this->channels[RADIOLIB_LORAWAN_RX2], 
-                              RADIOLIB_LORAWAN_RX2, 
-                              this->rxDelays[RADIOLIB_LORAWAN_RX2], 
+  state = this->receiveClassA(RADIOLIB_LORAWAN_DOWNLINK,
+                              &this->channels[RADIOLIB_LORAWAN_RX2],
+                              RADIOLIB_LORAWAN_RX2,
+                              this->rxDelays[RADIOLIB_LORAWAN_RX2],
                               this->tUplinkEnd);
   RADIOLIB_ASSERT(state);
+
+  // TS011: open RXR window if WOR-ACK was received with valid relay parameters
+  if(this->worAckReceived && this->worRxrFreq != 0 && this->worRxrDr != RADIOLIB_LORAWAN_DATA_RATE_UNUSED) {
+    LoRaWANChannel_t rxrChannel;
+    rxrChannel.idx = 0;
+    rxrChannel.freq = this->worRxrFreq;
+    rxrChannel.drMin = this->worRxrDr;
+    rxrChannel.drMax = this->worRxrDr;
+    rxrChannel.dr = this->worRxrDr;
+    // clamp TOffset to minimum to prevent dlDelay=0 with non-zero tReference (receiveClassA error)
+    RadioLibTime_t rxrDelay = (this->worTOffset >= RADIOLIB_LORAWAN_WOR_RXR_TOFFSET_MIN_MS)
+                              ? this->worTOffset : RADIOLIB_LORAWAN_WOR_RXR_TOFFSET_MIN_MS;
+    state = this->receiveClassA(RADIOLIB_LORAWAN_DOWNLINK, &rxrChannel, RADIOLIB_LORAWAN_RXR,
+                                 rxrDelay, this->tUplinkEnd);
+    if(state > 0) {
+      return(RADIOLIB_LORAWAN_RXR);
+    }
+    state = RADIOLIB_ERR_NONE;
+  }
 
   state = this->receiveClassC();
   return(state);
@@ -3843,6 +3909,137 @@ int16_t LoRaWANNode::addPackage(uint8_t fPort, bool isApp) {
 
 void LoRaWANNode::removePackage(uint8_t fPort) {
   this->packages[fPort - RADIOLIB_LORAWAN_FPORT_RESERVED].enabled = false;
+}
+
+int16_t LoRaWANNode::composeWoR(uint8_t* out) {
+  // MHDR: proprietary frame type
+  out[RADIOLIB_LORAWAN_WOR_MHDR_POS] = RADIOLIB_LORAWAN_MHDR_MTYPE_PROPRIETARY | RADIOLIB_LORAWAN_MHDR_MAJOR_R1;
+
+  // DevAddr (4 bytes, little-endian)
+  LoRaWANNode::hton<uint32_t>(&out[RADIOLIB_LORAWAN_WOR_DEV_ADDR_POS], this->devAddr);
+
+  // FCnt_WOR: lower 16 bits of upcoming uplink FCnt
+  LoRaWANNode::hton<uint16_t>(&out[RADIOLIB_LORAWAN_WOR_FCNT_POS], (uint16_t)(this->fCntUp & 0xFFFF));
+
+  // DR (upper nibble) + WOR period (lower nibble, 0 = not specified)
+  uint8_t upDr = this->channels[RADIOLIB_LORAWAN_UPLINK].dr;
+  out[RADIOLIB_LORAWAN_WOR_DR_PERIOD_POS] = (uint8_t)((upDr & 0x0F) << 4);
+
+  // Frequency of upcoming uplink (3 bytes, in 100 Hz steps, little-endian)
+  LoRaWANNode::hton<uint32_t>(&out[RADIOLIB_LORAWAN_WOR_FREQ_POS], this->channels[RADIOLIB_LORAWAN_UPLINK].freq, 3);
+
+  // MIC over MHDR + FHDR_WOR (11 bytes), using WOR_S_INT_KEY
+  uint32_t mic = this->generateMIC(out, RADIOLIB_LORAWAN_WOR_PAYLOAD_LEN, this->worSIntKey);
+  LoRaWANNode::hton<uint32_t>(&out[RADIOLIB_LORAWAN_WOR_MIC_POS], mic);
+
+  return(RADIOLIB_ERR_NONE);
+}
+
+int16_t LoRaWANNode::receiveWorAck() {
+  return(this->receiveWorAck(this->worSIntKey, this->worSEncKey,
+                              this->devAddr, (uint32_t)(this->fCntUp & 0xFFFF)));
+}
+
+int16_t LoRaWANNode::receiveWorAck(uint8_t* intKey, uint8_t* encKey, uint32_t addr, uint32_t fcnt) {
+  this->worAckReceived = false;
+  this->worRxrDr = RADIOLIB_LORAWAN_DATA_RATE_UNUSED;
+  this->worRxrFreq = 0;
+  this->worTOffset = 0;
+
+  // try each configured txAck channel
+  for(int i = 0; i < 2; i++) {
+    const LoRaWANChannel_t* ackCh = &this->band->txAck[i];
+    if(ackCh->freq == 0) {
+      continue;
+    }
+
+    // open WOR-ACK receive window with a fixed delay to allow relay CAD detection + decode + ACK TX
+    int16_t state = this->receiveClassA(RADIOLIB_LORAWAN_DOWNLINK, ackCh, RADIOLIB_LORAWAN_RXR,
+                                         RADIOLIB_LORAWAN_WOR_ACK_DELAY_MS, this->tUplinkEnd);
+    if(state <= 0) {
+      continue;
+    }
+
+    // packet received - check length matches WOR-ACK format
+    size_t pktLen = this->phyLayer->getPacketLength();
+    if(pktLen != RADIOLIB_LORAWAN_WOR_ACK_FRAME_LEN) {
+      continue;
+    }
+
+    uint8_t ackFrame[RADIOLIB_LORAWAN_WOR_ACK_FRAME_LEN];
+    state = this->phyLayer->readData(ackFrame, pktLen);
+    if(state == RADIOLIB_ERR_LORA_HEADER_DAMAGED) {
+      state = RADIOLIB_ERR_NONE;
+    }
+    if(state != RADIOLIB_ERR_NONE) {
+      continue;
+    }
+
+    // check MHDR
+    if((ackFrame[0] & RADIOLIB_LORAWAN_MHDR_MTYPE_MASK) != RADIOLIB_LORAWAN_MHDR_MTYPE_PROPRIETARY) {
+      continue;
+    }
+
+    // verify MIC (last 4 bytes) over MHDR + encrypted payload
+    if(!this->verifyMIC(ackFrame, RADIOLIB_LORAWAN_WOR_ACK_FRAME_LEN, intKey)) {
+      RADIOLIB_DEBUG_PROTOCOL_PRINTLN("WOR-ACK MIC mismatch");
+      continue;
+    }
+
+    // decrypt WOR-ACK payload
+    uint8_t worAckPayload[RADIOLIB_LORAWAN_WOR_ACK_PAYLOAD_LEN];
+    this->processAES(&ackFrame[1], RADIOLIB_LORAWAN_WOR_ACK_PAYLOAD_LEN,
+                     encKey, worAckPayload,
+                     addr, fcnt,
+                     RADIOLIB_LORAWAN_DOWNLINK, 0, false);
+
+    // byte 0: CadToRx (relay-side, ignored by end device)
+    // byte 1: RelayDataRate for RXR window
+    // bytes 2-3: XTALAccuracy
+    // byte 4: CADPeriodicity
+    // bytes 5-6: TOffset in ms
+    this->worRxrDr = worAckPayload[RADIOLIB_LORAWAN_WOR_ACK_RELAY_DR_POS];
+    this->worTOffset = (RadioLibTime_t)LoRaWANNode::ntoh<uint16_t>(&worAckPayload[RADIOLIB_LORAWAN_WOR_ACK_TOFFSET_POS]);
+
+    // RXR window uses the same frequency as the upcoming uplink
+    this->worRxrFreq = this->channels[RADIOLIB_LORAWAN_UPLINK].freq;
+
+    // clamp RelayDataRate to valid range
+    if(this->worRxrDr >= RADIOLIB_LORAWAN_CHANNEL_NUM_DATARATES ||
+       this->band->dataRates[this->worRxrDr].modem == RADIOLIB_MODEM_NONE) {
+      this->worRxrDr = this->channels[RADIOLIB_LORAWAN_UPLINK].dr;
+    }
+
+    this->worAckReceived = true;
+    RADIOLIB_DEBUG_PROTOCOL_PRINTLN("WOR-ACK received: DR=%d, TOffset=%lums", this->worRxrDr, (unsigned long)this->worTOffset);
+    break;
+  }
+
+  return(RADIOLIB_ERR_NONE);
+}
+
+int16_t LoRaWANNode::composeWoRJoin(uint8_t* out) {
+  // MHDR: proprietary frame type
+  out[RADIOLIB_LORAWAN_WOR_JOIN_MHDR_POS] = RADIOLIB_LORAWAN_MHDR_MTYPE_PROPRIETARY | RADIOLIB_LORAWAN_MHDR_MAJOR_R1;
+
+  // DR (upper nibble) + WOR period (lower nibble, 0 = not specified)
+  uint8_t upDr = this->channels[RADIOLIB_LORAWAN_UPLINK].dr;
+  out[RADIOLIB_LORAWAN_WOR_JOIN_DR_PERIOD_POS] = (uint8_t)((upDr & 0x0F) << 4);
+
+  // frequency of the upcoming Join-Request (3 bytes, 100 Hz steps)
+  LoRaWANNode::hton<uint32_t>(&out[RADIOLIB_LORAWAN_WOR_JOIN_FREQ_POS], this->channels[RADIOLIB_LORAWAN_UPLINK].freq, 3);
+
+  // JoinEUI (8 bytes, little-endian)
+  LoRaWANNode::hton<uint64_t>(&out[RADIOLIB_LORAWAN_WOR_JOIN_EUI_POS], this->joinEUI);
+
+  // DevNonce (2 bytes) - same value as used in the upcoming Join-Request
+  LoRaWANNode::hton<uint16_t>(&out[RADIOLIB_LORAWAN_WOR_JOIN_DEV_NONCE_POS], this->devNonce);
+
+  // MIC over first 15 bytes using NwkKey (for 1.0: appKey stored in nwkKey; for 1.1: nwkKey)
+  uint32_t mic = this->generateMIC(out, RADIOLIB_LORAWAN_WOR_JOIN_PAYLOAD_LEN, this->nwkKey);
+  LoRaWANNode::hton<uint32_t>(&out[RADIOLIB_LORAWAN_WOR_JOIN_MIC_POS], mic);
+
+  return(RADIOLIB_ERR_NONE);
 }
 
 void LoRaWANNode::processAES(const uint8_t* in, size_t len, uint8_t* key, uint8_t* out, uint32_t addr, uint32_t fCnt, uint8_t dir, uint8_t ctrId, bool counter) {
