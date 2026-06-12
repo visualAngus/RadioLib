@@ -205,8 +205,10 @@ int16_t LoRaWANNode::sendReceive(const uint8_t* dataUp, size_t lenUp, uint8_t fP
       if(worCh->freq == 0) {
         worCh = &this->band->txWoR[0];
       }
-      // transmit WOR frame; ignore error (non-fatal, relay is optional)
+      // long preamble so relay CAD can detect the WOR frame (~1 s window at SF9/125 kHz)
+      this->phyLayer->setPreambleLength(RADIOLIB_LORAWAN_WOR_PREAMBLE_LEN);
       (void)this->transmitUplink(worCh, worMsg, RADIOLIB_LORAWAN_WOR_FRAME_LEN);
+      this->phyLayer->setPreambleLength(RADIOLIB_LORAWAN_LORA_PREAMBLE_LEN);
       // attempt to receive WOR-ACK from relay
       this->receiveWorAck();
     }
@@ -1025,7 +1027,9 @@ int16_t LoRaWANNode::activateOTAA(LoRaWANJoinEvent_t *joinEvent) {
     uint8_t worJMsg[RADIOLIB_LORAWAN_WOR_JOIN_FRAME_LEN];
     this->composeWoRJoin(worJMsg);
     const LoRaWANChannel_t* worCh = &this->band->txWoR[0];
+    this->phyLayer->setPreambleLength(RADIOLIB_LORAWAN_WOR_PREAMBLE_LEN);
     (void)this->transmitUplink(worCh, worJMsg, RADIOLIB_LORAWAN_WOR_JOIN_FRAME_LEN);
+    this->phyLayer->setPreambleLength(RADIOLIB_LORAWAN_LORA_PREAMBLE_LEN);
     // pre-join: use NwkKey for WOR-ACK MIC/decrypt; devAddr=0, fcnt=0
     this->receiveWorAck(this->nwkKey, this->nwkKey, 0, 0);
   }

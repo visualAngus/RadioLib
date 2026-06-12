@@ -18,6 +18,8 @@
 // preamble format
 #define RADIOLIB_LORAWAN_LORA_SYNC_WORD                         (0x34)
 #define RADIOLIB_LORAWAN_LORA_PREAMBLE_LEN                      (8)
+// WOR preamble must be long enough for the relay's CAD window (~1 s at SF9/125 kHz = 256 symbols)
+#define RADIOLIB_LORAWAN_WOR_PREAMBLE_LEN                       (256)
 #define RADIOLIB_LORAWAN_GFSK_SYNC_WORD                         (0xC194C1)
 #define RADIOLIB_LORAWAN_GFSK_PREAMBLE_LEN                      (5)
 #define RADIOLIB_LORAWAN_LR_FHSS_SYNC_WORD                      (0x2C0F7995)
