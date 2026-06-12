@@ -122,6 +122,7 @@
 #include "protocols/BellModem/BellModem.h"
 #include "protocols/LoRaWAN/LoRaWAN.h"
 #include "protocols/LoRaWAN/LoRaWANPacMan.h"
+#include "protocols/LoRaWAN/LoRaWANRelay.h"
 #include "protocols/ADSB/ADSB.h"
 
 // utilities
