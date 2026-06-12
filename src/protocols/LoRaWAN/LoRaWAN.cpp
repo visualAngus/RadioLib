@@ -1526,7 +1526,11 @@ int16_t LoRaWANNode::transmitUplink(const LoRaWANChannel_t* chnl, uint8_t* in, u
   const ModemType_t modem = this->band->dataRates[currentDr].modem;
   const DataRate_t* dr = &this->band->dataRates[currentDr].dr;
   const PacketConfig_t* pc = &this->band->dataRates[currentDr].pc;
-  RadioLibTime_t toa = this->phyLayer->calculateTimeOnAir(modem, *dr, *pc, len) / 1000;
+  PacketConfig_t pcActual = *pc;
+  if(preamble > 0 && modem == ModemType_t::RADIOLIB_MODEM_LORA) {
+    pcActual.lora.preambleLength = preamble;
+  }
+  RadioLibTime_t toa = this->phyLayer->calculateTimeOnAir(modem, *dr, pcActual, len) / 1000;
 
   if(this->dwellTimeUp) {
     if(toa > this->dwellTimeUp) {
