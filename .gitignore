@@ -19,3 +19,4 @@ build/
 
 # Compote build output
 dist
+*.o
