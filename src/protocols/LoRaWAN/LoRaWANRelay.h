@@ -79,6 +79,14 @@ class LoRaWANRelay : public LoRaWANNode {
     int16_t relayLoop();
 
     /*!
+      \brief Handle WOR reception on a channel already detected by external CAD.
+      Skips the internal CAD scan and goes directly to receive + relay sequence.
+      \param chIdx WOR channel index (0 or 1) that was detected.
+      \returns RADIOLIB_ERR_NONE on success/no-frame, negative on error.
+    */
+    int16_t relayLoopOnDetected(uint8_t chIdx);
+
+    /*!
       \brief Set the data rate the relay uses for WOR-ACK and RXR transmissions to end devices.
       \param dr Data rate index.
     */

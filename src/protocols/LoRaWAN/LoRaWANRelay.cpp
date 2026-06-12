@@ -106,6 +106,32 @@ int16_t LoRaWANRelay::relayLoop() {
   return(RADIOLIB_ERR_NONE);
 }
 
+int16_t LoRaWANRelay::relayLoopOnDetected(uint8_t chIdx) {
+  Module* mod = this->getModule();
+  if(chIdx >= 2 || this->band->txWoR[chIdx].freq == 0) {
+    return(RADIOLIB_ERR_NONE);
+  }
+  const LoRaWANChannel_t* worCh = &this->band->txWoR[chIdx];
+  uint8_t worBuf[RADIOLIB_LORAWAN_WOR_JOIN_FRAME_LEN];
+  size_t worLen = 0;
+
+  int16_t state = this->receiveEdFrame(worCh->freq, worCh->dr, worBuf, &worLen, 500);
+  if(state != RADIOLIB_ERR_NONE || worLen == 0) {
+    return(RADIOLIB_ERR_NONE);
+  }
+  RadioLibTime_t tWorRx = mod->hal->millis();
+
+  if((worBuf[0] & RADIOLIB_LORAWAN_MHDR_MTYPE_MASK) != RADIOLIB_LORAWAN_MHDR_MTYPE_PROPRIETARY) {
+    return(RADIOLIB_ERR_NONE);
+  }
+  if(worLen == RADIOLIB_LORAWAN_WOR_FRAME_LEN) {
+    return(this->handleWorUplink(worBuf, chIdx, tWorRx));
+  } else if(worLen == RADIOLIB_LORAWAN_WOR_JOIN_FRAME_LEN) {
+    return(this->handleWorJoin(worBuf, chIdx, tWorRx));
+  }
+  return(RADIOLIB_ERR_NONE);
+}
+
 int16_t LoRaWANRelay::handleWorUplink(uint8_t* worBuf, uint8_t chIdx, RadioLibTime_t tWorRx) {
   (void)tWorRx;
 
