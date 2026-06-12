@@ -1258,6 +1258,9 @@ class LoRaWANNode {
     // clear a MAC buffer, possible retaining persistent MAC commands
     void clearMacCommands(uint8_t* inOut, uint8_t* lenInOut, uint8_t dir);
 
+    // accessor for subclasses (e.g. LoRaWANRelay) that need the HAL but cannot call getMod() directly
+    Module* getModule() const { return(this->phyLayer->getMod()); }
+
     // configure the common physical layer properties (frequency, sync word etc.)
     int16_t setPhyProperties(const LoRaWANChannel_t* chnl, uint8_t dir, int8_t pwr, size_t pre = 0);
 

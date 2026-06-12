@@ -53,7 +53,7 @@ int16_t LoRaWANRelay::configureRadioForChannel(const LoRaWANChannel_t* ch, uint8
 }
 
 int16_t LoRaWANRelay::relayLoop() {
-  Module* mod = this->phyLayer->getMod();
+  Module* mod = this->getModule();
 
   // scan both WOR channels for a preamble (CAD)
   int8_t detectedChIdx = -1;
@@ -149,7 +149,7 @@ int16_t LoRaWANRelay::handleWorUplink(uint8_t* worBuf, uint8_t chIdx, RadioLibTi
     return(RADIOLIB_ERR_NONE);
   }
 
-  RadioLibTime_t tUplinkEnd = this->phyLayer->getMod()->hal->millis();
+  RadioLibTime_t tUplinkEnd = this->getModule()->hal->millis();
   int8_t snr = (int8_t)this->phyLayer->getSNR();
 
   RADIOLIB_DEBUG_PROTOCOL_PRINTLN("WOR: uplink received (%d bytes, SNR=%d)", (int)ulLen, (int)snr);
@@ -222,7 +222,7 @@ int16_t LoRaWANRelay::handleWorJoin(const uint8_t* worBuf, uint8_t chIdx, RadioL
     return(RADIOLIB_ERR_NONE);
   }
 
-  RadioLibTime_t tJoinEnd = this->phyLayer->getMod()->hal->millis();
+  RadioLibTime_t tJoinEnd = this->getModule()->hal->millis();
   RADIOLIB_DEBUG_PROTOCOL_PRINTLN("WOR-J: Join-Request received (%d bytes)", (int)joinLen);
 
   // forward Join-Request to NS
@@ -397,7 +397,7 @@ int16_t LoRaWANRelay::forwardJoinToNS(const uint8_t* joinFrame, size_t joinFrame
 
 int16_t LoRaWANRelay::sendForwardedFrame(const uint8_t* frame, size_t frameLen,
                                            uint32_t freq, uint8_t dr, RadioLibTime_t tTx) {
-  Module* mod = this->phyLayer->getMod();
+  Module* mod = this->getModule();
 
   // wait until the scheduled TX time
   RadioLibTime_t tNow = mod->hal->millis();
