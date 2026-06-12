@@ -205,10 +205,7 @@ int16_t LoRaWANNode::sendReceive(const uint8_t* dataUp, size_t lenUp, uint8_t fP
       if(worCh->freq == 0) {
         worCh = &this->band->txWoR[0];
       }
-      // long preamble so relay CAD can detect the WOR frame (~1 s window at SF9/125 kHz)
-      this->phyLayer->setPreambleLength(RADIOLIB_LORAWAN_WOR_PREAMBLE_LEN);
-      (void)this->transmitUplink(worCh, worMsg, RADIOLIB_LORAWAN_WOR_FRAME_LEN);
-      this->phyLayer->setPreambleLength(RADIOLIB_LORAWAN_LORA_PREAMBLE_LEN);
+      (void)this->transmitUplink(worCh, worMsg, RADIOLIB_LORAWAN_WOR_FRAME_LEN, RADIOLIB_LORAWAN_WOR_PREAMBLE_LEN);
       // attempt to receive WOR-ACK from relay
       this->receiveWorAck();
     }
@@ -1027,9 +1024,7 @@ int16_t LoRaWANNode::activateOTAA(LoRaWANJoinEvent_t *joinEvent) {
     uint8_t worJMsg[RADIOLIB_LORAWAN_WOR_JOIN_FRAME_LEN];
     this->composeWoRJoin(worJMsg);
     const LoRaWANChannel_t* worCh = &this->band->txWoR[0];
-    this->phyLayer->setPreambleLength(RADIOLIB_LORAWAN_WOR_PREAMBLE_LEN);
-    (void)this->transmitUplink(worCh, worJMsg, RADIOLIB_LORAWAN_WOR_JOIN_FRAME_LEN);
-    this->phyLayer->setPreambleLength(RADIOLIB_LORAWAN_LORA_PREAMBLE_LEN);
+    (void)this->transmitUplink(worCh, worJMsg, RADIOLIB_LORAWAN_WOR_JOIN_FRAME_LEN, RADIOLIB_LORAWAN_WOR_PREAMBLE_LEN);
     // pre-join: use NwkKey for WOR-ACK MIC/decrypt; devAddr=0, fcnt=0
     this->receiveWorAck(this->nwkKey, this->nwkKey, 0, 0);
   }
@@ -1523,7 +1518,7 @@ void LoRaWANNode::micUplink(uint8_t* inOut, size_t lenInOut) {
   }
 }
 
-int16_t LoRaWANNode::transmitUplink(const LoRaWANChannel_t* chnl, uint8_t* in, uint8_t len) {
+int16_t LoRaWANNode::transmitUplink(const LoRaWANChannel_t* chnl, uint8_t* in, uint8_t len, uint16_t preamble) {
   int16_t state = RADIOLIB_ERR_UNKNOWN;
   Module* mod = this->phyLayer->getMod();
 
@@ -1542,8 +1537,9 @@ int16_t LoRaWANNode::transmitUplink(const LoRaWANChannel_t* chnl, uint8_t* in, u
 
   // set the physical layer configuration for uplink
   state = this->setPhyProperties(chnl,
-                                 RADIOLIB_LORAWAN_UPLINK, 
-                                 this->txPowerMax - 2*this->txPowerSteps);
+                                 RADIOLIB_LORAWAN_UPLINK,
+                                 this->txPowerMax - 2*this->txPowerSteps,
+                                 preamble);
   RADIOLIB_ASSERT(state);
 
   RadioModeConfig_t modeCfg;
